@@ -1,0 +1,68 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - testeste
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+*
+
+env:
+  TZ: "/usr/share/zoneinfo/America/Sao_Paulo"
+  LANG: C.UTF-8
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  prepare:
+    name: Prepare
+    uses: dlpco/infra-github-workflows/.github/workflows/prepare-deploy.yml@prepare-deploy-stable
+
+
+  build:
+    name: Docker Build and Push image
+    needs: ["prepare"]
+    uses: dlpco/infra-github-workflows/.github/workflows/docker-image-build-with-cache.yml@main
+    with:
+      image_name: stonebankingregistry347.azurecr.io/dlpco/open-finance-integration
+      tag: ${{ needs.prepare.outputs.tag }}
+      push: true
+    secrets: inherit
+
+  homolog:
+    name: Homolog
+    needs: [ prepare, build ]
+    if: needs.prepare.outputs.homolog == 'true'
+    uses: dlpco/infra-github-workflows/.github/workflows/deploy-app.yml@deploy-app-stable
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      application_type: backend
+      helmfile_dir: deploy
+      environment: homolog
+    secrets: inherit
+
+  sandbox:
+    name: Sandbox
+    needs: [ prepare, build ]
+    if: needs.prepare.outputs.sandbox == 'true'
+    uses: dlpco/infra-github-workflows/.github/workflows/deploy-app.yml@deploy-app-stable
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      application_type: backend
+      helmfile_dir: deploy
+      environment: sandbox
+    secrets: inherit
+
+  # production:
+  #   name: Production
+  #   needs: [ prepare, build, sandbox ]
+  #   if: needs.prepare.outputs.production == 'true'
+    # uses: dlpco/infra-github-workflows/.github/workflows/deploy-app.yml@deploy-app-stable
+    # with:
+    #   tag: ${{ needs.prepare.outputs.tag }}
+    #   application_type: backend
+    #   helmfile_dir: deploy
+    #   environment: production
+  #   secrets: inherit
