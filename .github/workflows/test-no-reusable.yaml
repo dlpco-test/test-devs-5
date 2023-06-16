@@ -1,0 +1,121 @@
+name: Build and Test
+
+on:
+  push:
+    branches: ["aaaaa"]
+
+permissions:
+  contents: read
+
+env:
+  TZ: "/usr/share/zoneinfo/America/Sao_Paulo"
+  LANG: C.UTF-8
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: [self-hosted, runner-devops-shared]
+    services:
+      postgres:
+        image: postgres:14-alpine
+        env:
+          MIX_ENV: test
+          POSTGRES_USER: open_finance_integration
+          POSTGRES_PASSWORD: open_finance_integration
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      zookeeper:
+        image: confluentinc/cp-zookeeper:4.1.1
+        ports:
+          - 2181:2181
+        env:
+          ZOOKEEPER_CLIENT_PORT: 2181
+          ZOOKEEPER_TICK_TIME: 2000
+      kafka:
+        image: confluentinc/cp-kafka:4.1.1
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092"
+          KAFKA_ZOOKEEPER_CONNECT: "zookeeper:2181"
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install pkgs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libcrypto++-dev zlib1g-dev libsasl2-dev \
+                 liblz4-dev libzstd-dev ca-certificates libcurl4-openssl-dev
+      - name: Get Elixir and Erlang versions from .tool-versions
+        id: get-versions
+        uses: dlpco/app-github-custom-actions/asdf-tool-versions@asdf-tool-versions-0.2.0
+
+      - name: Set up Elixir
+        id: beam
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ steps.get-versions.outputs.elixir }}
+          otp-version: ${{ steps.get-versions.outputs.erlang }}
+
+      - name: Add Stone Repo
+        run: |
+          wget https://hex-stone.sandbox.stone.credit/public_key -O /tmp/hex_stone_public_key
+          mix hex.repo add stone https://hex-stone.sandbox.stone.credit --public-key=/tmp/hex_stone_public_key
+      - name: Restore dependencies cache
+        uses: actions/cache@v3
+        with:
+          path: deps
+          key: ${{ runner.os }}-deps-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-deps-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('**/mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Restore compiled dependencies cache
+        uses: actions/cache@v3
+        with:
+          path: _build
+          key: ${{ runner.os }}-compiled-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: ${{ runner.os }}-compiled-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('**/mix.lock') }}
+
+      - name: Compile project
+        run: |
+          MIX_ENV=test mix compile --warnings-as-errors
+      - name: Check Format
+        run: mix format --check-formatted
+
+      - name: Linter
+        run: mix credo --strict
+
+      - name: Codespell
+        run: |
+          pip install codespell
+          codespell --ignore-words=.codespell-ignore --skip="*.csv,*.json,*.md" ./lib ./config ./deploy CHANGELOG.md docker-compose.yml Dockerfile Makefile mix.exs
+      - name: Prepare Tests
+        run: |
+          mix ecto.create
+          mix ecto.migrate --quiet --no-compile
+      - name: Run Tests
+        run: mix test --exclude integration --warnings-as-errors --max-failures 1
+
+      - name: Restore PLT cache (dialyzer)
+        uses: actions/cache@v3
+        id: plt-cache
+        with:
+          path: priv/plts
+          key: ${{ runner.os }}-plt-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}
+          restore-keys: ${{ runner.os }}-plt-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}
+
+      - name: Create PLTs (dialyzer)
+        if: steps.plt-cache.outputs.cache-hit != 'true'
+        run: mix dialyzer --plt
+
+      - name: Run dialyzer
+        run: mix dialyzer --format short
